@@ -66,6 +66,22 @@ def _cross5(mask):
     return mask[1:-1, 1:-1] & mask[1:-1, :-2] & mask[1:-1, 2:] & mask[:-2, 1:-1] & mask[2:, 1:-1]
 
 
+def _entry_bytes(entry: dict) -> int:
+    return sum(v.numel() * v.element_size() for v in entry.values() if torch.is_tensor(v))
+
+
+def _host_available_bytes() -> int:
+    """MemAvailable from /proc/meminfo (Linux); 8 GB if it cannot be read."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 8 << 30
+
+
 class Trainer3DGRUT:
     """GOFish trainer (3DGUT renderer, SOF geometry objective, PPISP).
 
@@ -117,6 +133,25 @@ class Trainer3DGRUT:
         # Controller-only phase: the scene is frozen, so the pre-PPISP render
         # of each training frame is computed once and reused.
         self._controller_render_cache: dict[tuple[int, int], dict] = {}
+        # Each entry holds every render output of one frame in host RAM (~56 MB
+        # at 736x720), so an uncapped cache over ~1.3k frames exceeds the RAM of
+        # a 64 GB machine. Past the budget, uncached frames are re-rendered; the
+        # scene is frozen, so the result is the same, only slower.
+        self._controller_cache_bytes = 0
+        self._controller_cache_budget: Optional[int] = None
+        self._controller_cache_max_gb = OmegaConf.select(
+            conf, "post_processing.controller_cache_max_gb", default=None)
+
+    def _controller_cache_has_room(self, outputs: dict) -> bool:
+        if self._controller_cache_budget is None:
+            if self._controller_cache_max_gb is not None:
+                budget = float(self._controller_cache_max_gb) * 1e9
+            else:
+                budget = 0.5 * _host_available_bytes()
+            self._controller_cache_budget = int(budget)
+            logger.info(f"controller-phase render cache budget: {budget / 1e9:.1f} GB of host RAM")
+        size = sum(v.numel() * v.element_size() for v in outputs.values() if torch.is_tensor(v))
+        return self._controller_cache_bytes + size <= self._controller_cache_budget
 
     def init_dataloaders(self, conf: DictConfig):
         configure_camera_sampler_seed(int(conf.dataset.camera_sampler_seed))
@@ -547,12 +582,14 @@ class Trainer3DGRUT:
 
         if cached is None:
             outputs = apply_background(self.model.background, outputs, gpu_batch, training=True)
-            if cache_active:
-                self._controller_render_cache[cache_key] = {
+            if cache_active and self._controller_cache_has_room(outputs):
+                entry = {
                     name: (None if name == "frame_time_ms"
                            else value.detach().cpu().contiguous() if torch.is_tensor(value) else value)
                     for name, value in outputs.items()
                 }
+                self._controller_render_cache[cache_key] = entry
+                self._controller_cache_bytes += _entry_bytes(entry)
 
         if self.post_processing is not None:
             with torch.cuda.nvtx.range(f"train_{global_step}_post_processing"):

@@ -98,7 +98,13 @@ class MaskedLossCache:
         counts = F.conv2d(mask_b1hw, kernel, padding=WINDOW_SIZE // 2)
         support = (counts == float(WINDOW_SIZE * WINDOW_SIZE)).detach()
         entry = MaskedLossSupport(owned_mask, support)
-        self._support[key] = entry
+        # Per-frame supports (frame_idx >= 0) are not retained: each holds the
+        # mask, its SSIM support and flat gather indices (~17 MB at 736x720),
+        # so caching one per training frame grows without bound and exhausts
+        # device memory on datasets with per-image masks. Only per-camera
+        # supports, which are few, are cached.
+        if frame_idx < 0:
+            self._support[key] = entry
         return entry
 
     def gaussian_window(self, reference_bchw: torch.Tensor) -> torch.Tensor:

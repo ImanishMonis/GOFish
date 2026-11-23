@@ -51,6 +51,7 @@ struct SplatRaster::OpacityFieldContext {
     uint32_t round                 = 0;
     std::vector<torch::Tensor> tableRayOrigins;
     std::vector<torch::Tensor> tablePhysicalMasks;
+    std::vector<torch::Tensor> tableUniqueBuffers;  // distinct origin/mask buffers retained by the table
     torch::Tensor roundActive;
     torch::Tensor roundObserved;
     torch::Tensor roundEqual;
@@ -76,6 +77,23 @@ struct SplatRaster::OpacityFieldContext {
 };
 
 namespace {
+
+// The bisection table keeps a raw pointer to each camera's ray origins and physical mask and
+// only reads them. Frames of one physical camera have identical buffers, so a table entry
+// reuses an earlier retained buffer with equal contents instead of holding its own clone;
+// this keeps device memory per physical camera rather than per frame.
+torch::Tensor opacityFieldShareTableBuffer(std::vector<torch::Tensor>& unique,
+                                           const torch::Tensor& tensor) {
+    if (!tensor.defined() || tensor.numel() == 0) return tensor;
+    for (const auto& kept : unique) {
+        if (kept.scalar_type() == tensor.scalar_type() && kept.sizes() == tensor.sizes() &&
+            torch::equal(kept, tensor)) {
+            return kept;
+        }
+    }
+    unique.push_back(tensor);
+    return tensor;
+}
 
 void opacityFieldRequireTensor(const torch::Tensor& tensor, const char* name,
                                int device, torch::ScalarType type) {
@@ -410,8 +428,12 @@ void SplatRaster::stageBisectionCamera(
     const TSensorPose sensorToWorldPose = sensorPoseInverse(worldToSensorPose);
 
     // The table keeps raw pointers to the origin and mask; retain them until release.
-    context.tableRayOrigins.push_back(context.currentRayOrigin);
-    context.tablePhysicalMasks.push_back(context.currentPhysicalMask);
+    context.tableRayOrigins.push_back(
+        opacityFieldShareTableBuffer(context.tableUniqueBuffers, context.currentRayOrigin));
+    context.tablePhysicalMasks.push_back(
+        opacityFieldShareTableBuffer(context.tableUniqueBuffers, context.currentPhysicalMask));
+    context.currentRayOrigin    = torch::Tensor();
+    context.currentPhysicalMask = torch::Tensor();
     persistent_table::CameraStageTelemetry telemetry;
     context.streamSynchronized = false;
     const Status status = persistent_table::appendCamera(

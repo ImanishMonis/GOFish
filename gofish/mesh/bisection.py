@@ -63,11 +63,21 @@ def refine_crossings(raster, shape: EffectiveShape, cameras: list[TrainingCamera
     sigma = torch.from_numpy(np.array(shape.sigma_max, dtype=np.float32, order="C", copy=True)).to(device).contiguous()
 
     free_bytes, _total = torch.cuda.mem_get_info(device)
+    # The table retains one ray-origin raster and one mask per distinct buffer (frames of one
+    # physical camera share them), plus the transient direction/origin of the camera being staged.
+    origins, masks = set(), set()
     camera_bytes = 0
     for camera in cameras:
-        camera_bytes += int(camera.ray_direction.numel()) * 4
-        if camera.physical_mask is not None:
-            camera_bytes += int(camera.physical_mask.numel()) * int(camera.physical_mask.element_size())
+        raster_bytes = int(camera.ray_direction.numel()) * 4
+        origin_key = (tuple(camera.ray_direction.shape), tuple(camera.ray_origin.flatten().tolist()))
+        if origin_key not in origins:
+            origins.add(origin_key)
+            camera_bytes += raster_bytes
+        mask = camera.physical_mask
+        if mask is not None and id(mask) not in masks:
+            masks.add(id(mask))
+            camera_bytes += int(mask.numel()) * int(mask.element_size())
+    camera_bytes += 3 * max(int(camera.ray_direction.numel()) * 4 for camera in cameras)
     capacity = batch_size(edge_count, int(free_bytes), camera_bytes)
 
     vertices = np.empty((edge_count, 3), dtype="<f4")

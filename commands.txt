@@ -1,0 +1,17 @@
+
+### Run GOFish Pipeline 
+
+conda activate gofish && cd /ipb70/home_domuser2/s49imoni/GOFish
+tmux new -s gofish
+python train.py --config-name apps/fiord path=/cache/s49imoni/data/may_session_v3_edit_gofish \
+    out_dir=/cache/s49imoni/runs experiment_name=gofish_v2 dataset.camera_domains=[] dataset.downsample_factor=2 geometry=sof
+
+
+### convert checkpoint to .ply file 
+python -m gofish.tools.export_splat_ply \
+    --checkpoint /cache/s49imoni/runs/<NAME>/ours_35000/ckpt_35000.pt \
+    --out /cache/s49imoni/runs/<NAME>/<NAME>.ply
+
+
+### convert checkpoint to mesh 
+python mesh.py --checkpoint /cache/s49imoni/runs/gofish_v2/ours_30000/ckpt_30000.pt --out /cache/s49imoni/runs/gofish_v2/mesh

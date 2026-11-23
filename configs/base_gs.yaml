@@ -120,6 +120,9 @@ post_processing:
   method: ppisp
   use_controller: true
   n_distillation_steps: 5000  # controller-only steps after the scene clock
+  # Host-RAM cap (GB) for the controller phase's per-frame render cache; null = half of the
+  # RAM available when the phase starts. Frames beyond the cap are re-rendered (same result, slower).
+  controller_cache_max_gb: null
   # Wide-Angle Appearance Modeling: W = w(rho) exp(-a(u)), a per-camera nonincreasing radial profile
   # (knots over [rho_ap/2, rho_ap]) times a flat-field log-attenuation grid (cells per max(W, H)).
   # 0 disables W (W = 1), e.g. pinhole cameras.
